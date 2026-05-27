@@ -1,0 +1,36 @@
+Add *_large -> *_leaf compatibility shims for kernel 6.11+
+
+Kernel 6.11 renamed pgd_large/p4d_large/pud_large/pmd_large to *_leaf().
+VMware vmmon source still calls the old names. This adds compat shims
+in compat_pgtable.h so the existing code paths in pgtbl.h continue to
+build without modification.
+
+--- a/vmmon-only/include/compat_pgtable.h
++++ b/vmmon-only/include/compat_pgtable.h
+@@ -31,6 +31,26 @@
+ 
+ 
+ /*
++ * Kernel 6.11 renamed *_large() helpers to *_leaf().
++ * Provide compatibility shims so the original code paths still build.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
++#  ifndef pgd_large
++#    define pgd_large(x) pgd_leaf(x)
++#  endif
++#  ifndef p4d_large
++#    define p4d_large(x) p4d_leaf(x)
++#  endif
++#  ifndef pud_large
++#    define pud_large(x) pud_leaf(x)
++#  endif
++#  ifndef pmd_large
++#    define pmd_large(x) pmd_leaf(x)
++#  endif
++#endif
++
++
++/*
+  * p4d level appeared in 4.12.
+  */
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)

@@ -1,0 +1,18 @@
+Undef MAX before redefining in vnetInt.h
+
+Kernel 6.11+ defines a generic MAX() macro in <linux/minmax.h> that
+conflicts with vmnet local MAX() in vnetInt.h, producing redefinition
+warnings on every compile of bridge.c, driver.c, etc.
+
+Cosmetic on most kernels but becomes a hard failure with -Werror.
+
+--- a/vmnet-only/vnetInt.h
++++ b/vmnet-only/vnetInt.h
+@@ -47,6 +47,7 @@
+ #define LOG(level, args)
+ #endif
+ 
++#undef MAX
+ #define MAX(_a, _b)   (((_a) > (_b)) ? (_a) : (_b))
+ 
+ /*
