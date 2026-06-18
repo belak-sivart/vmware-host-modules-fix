@@ -1,7 +1,9 @@
 # vmware-host-modules-fix
 
 Patches and an install script that make VMware Workstation **17.6.0**'s
-`vmmon` and `vmnet` kernel modules build on Linux kernels **6.11.x – 6.13.x**.
+`vmmon` and `vmnet` kernel modules build **and run reliably** on Linux kernels
+**6.11.x – 6.13.x** — including a fix for a runtime RCU stall that otherwise
+freezes the host whenever a VM runs.
 
 Tested on a Linux kernel 6.12.x system.
 
@@ -19,9 +21,26 @@ the bundled `vmmon.tar` / `vmnet.tar` don't account for:
 Result: `sudo vmware-modconfig --console --install-all` fails with
 `implicit declaration of function 'pgd_large'` and `'dev_base_lock' undeclared`.
 
+### Plus one runtime problem: the host freezes when a VM runs
+
+A fourth issue doesn't break the build at all — the modules compile and load
+fine — but the host **freezes** after a VM has been running for a few minutes,
+sandboxed apps (Flatpaks) hang, and shutdown never completes (you have to hold
+the power button down):
+
+| # | Kernel behaviour                                                    | Where it breaks                           |
+|---|---------------------------------------------------------------------|-------------------------------------------|
+| 4 | Expedited RCU expects every CPU to answer an IPI; a CPU running the VM monitor with host interrupts disabled never does | `vmmon-only/common/task.c` world switch (**runtime**, not build) |
+
+vmmon runs guest code with host interrupts disabled but never tells the kernel
+the CPU has entered guest mode (KVM does, via `guest_context_enter_irqoff()`).
+The kernel logs `rcu_preempt detected expedited stalls on CPUs/tasks:
+{ N-...D }`, that core wedges in uninterruptible (`D`) state, and the machine
+degrades from there.
+
 ## What this repo does
 
-Three small unified-diff patches:
+Four small unified-diff patches:
 
 - `patches/0001-vmmon-pgtable-leaf-shims.patch` — adds `*_large → *_leaf` compat
   shims in `compat_pgtable.h`, version-gated to kernel 6.11+
@@ -29,6 +48,12 @@ Three small unified-diff patches:
   `dev_base_lock` for `rtnl_lock()` on kernel 6.12+, adds missing includes
 - `patches/0003-vmnet-undef-MAX.patch` — `#undef MAX` before the local
   redefinition in `vnetInt.h`
+- `patches/0004-vmmon-rcu-stall-guest-enter-exit.patch` — wraps vmmon's world
+  switch with KVM-style guest enter/exit (`HostIF_RCUGuestEnter/Exit`) so RCU
+  treats the VM's CPU as quiescent, fixing the runtime freeze above. On
+  non-`nohz_full` hosts (most desktops), also boot with
+  `rcupdate.rcu_normal=1` — **recommended** — to fully suppress expedited
+  grace-period stalls.
 
 Plus `install.sh` and `uninstall.sh` to apply/revert them safely.
 
@@ -123,5 +148,5 @@ The general approach (community-maintained patches against stale VMware
 module sources) follows the long tradition of forks like
 [mkubecek/vmware-host-modules](https://github.com/mkubecek/vmware-host-modules)
 and its successors. This repo is narrower in scope — one VMware version,
-one kernel range, three patches — so it's easy to read end to end and
+one kernel range, four patches — so it's easy to read end to end and
 debug if something changes.

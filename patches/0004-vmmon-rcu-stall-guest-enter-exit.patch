@@ -1,0 +1,138 @@
+Fix host RCU stalls / freezes when running a VM (kernel 6.x)
+
+This is a RUNTIME fix, not a build fix: the modules compile and load fine,
+but starting a VM eventually wedges a host CPU core and freezes the system.
+
+vmmon's world switch (Task_Switch) runs guest code with host interrupts
+disabled, but -- unlike KVM -- never tells the host kernel that the pCPU has
+entered guest mode. The host kernel therefore still believes the core is
+executing in-kernel, so an expedited RCU grace period (synchronize_rcu_-
+expedited) IPIs the core, gets no response, and stalls. The core wedges in
+'D' state (rcu_preempt detected expedited stalls on CPUs/tasks: { N-...D }),
+which freezes the desktop, hangs sandboxed apps, and prevents clean shutdown.
+
+Mirror KVM's guest_context_enter_irqoff()/guest_context_exit_irqoff(): mark
+the pCPU as being in an RCU extended quiescent state around the world switch.
+New HostIF_RCUGuestEnter()/HostIF_RCUGuestExit() wrap the monitor run.
+
+IMPORTANT placement detail: the Exit call must run only AFTER the host GDT,
+segment selectors and GS base have been restored (just after TaskLoadIDT()).
+Calling it immediately after TaskSwitchToMonitor() dereferences per-CPU data
+through the monitor's GS base under the crossGDT and triple-faults the host.
+
+On non-nohz_full hosts context tracking is inactive, so the calls reduce to
+rcu_virt_note_context_switch(); pairing this with the kernel boot parameter
+rcupdate.rcu_normal=1 is recommended on such systems to fully suppress
+expedited-grace-period stalls.
+
+--- a/vmmon-only/common/task.c
++++ b/vmmon-only/common/task.c
+@@ -2629,8 +2629,15 @@
+          DEBUG_ONLY(crosspage->monTinyStack[0] = 0xDEADBEEF;)
+          DEBUG_ONLY(crosspage->hostTinyStack[0] = 0xDEADBEEF;)
+          /* Running in host context prior to TaskSwitchToMonitor() */
++         HostIF_RCUGuestEnter();
+          TaskSwitchToMonitor(crosspage);
+-         /* Running in host context after to TaskSwitchToMonitor() */
++         /*
++          * Back from the monitor, BUT the host GDT, segment selectors and
++          * (critically) the GS base are NOT restored yet -- per-CPU kernel
++          * data is unreachable, so it is NOT safe to run kernel C code on
++          * this pCPU here.  The matching HostIF_RCUGuestExit() is deferred
++          * until after the host GDT/segments/IDT have been restored below.
++          */
+ 
+          TS_ASSERT(crosspage->monTinyStack[0] == 0xDEADBEEF);
+          TS_ASSERT(crosspage->hostTinyStack[0] == 0xDEADBEEF);
+@@ -2738,6 +2745,17 @@
+ 
+          TaskLoadIDT(&hostIDT);
+ 
++         /*
++          * Host GDT, segments, GS base and IDT are now fully restored and
++          * interrupts are still disabled, so it is finally safe to run kernel
++          * C code on this pCPU again.  Exit the RCU guest/quiescent state that
++          * HostIF_RCUGuestEnter() entered before the world switch.  Performing
++          * this exit any earlier (right after TaskSwitchToMonitor) dereferences
++          * per-CPU data through the monitor's GS base under the crossGDT and
++          * triple-faults the host (instant reset).
++          */
++         HostIF_RCUGuestExit();
++
+          if (pebsMSR != 0) {
+             X86MSR_SetMSR(IA32_MSR_PEBS_ENABLE, pebsMSR);
+          }
+--- a/vmmon-only/linux/hostif.c
++++ b/vmmon-only/linux/hostif.c
+@@ -33,6 +33,8 @@
+ #include <linux/delay.h>
+ #include <linux/file.h>
+ #include <linux/kernel.h>
++#include <linux/context_tracking.h>
++#include <linux/rcutree.h>
+ 
+ #include <linux/vmalloc.h>
+ #include <linux/slab.h>
+@@ -3416,3 +3418,50 @@
+    return err;
+ }
+ 
++
++/*
++ *-----------------------------------------------------------------------------
++ *
++ * HostIF_RCUGuestEnter / HostIF_RCUGuestExit --
++ *
++ *      Tell the host kernel that this pCPU is entering / leaving guest
++ *      (monitor) mode, which RCU treats as an extended quiescent state --
++ *      exactly as KVM does in guest_context_enter_irqoff().
++ *
++ *      Without this, the world switch runs guest code with interrupts
++ *      disabled while the host kernel still believes the pCPU is executing
++ *      in-kernel.  An expedited RCU grace period then stalls waiting for a
++ *      quiescent state that never arrives, wedging the core
++ *      (rcu_preempt expedited stall) and eventually freezing the host and
++ *      preventing clean shutdown.
++ *
++ *      When full context tracking is not active (the common case, no
++ *      nohz_full), context_tracking_guest_enter() is a no-op returning
++ *      FALSE, so we simply note a quiescent state for the grace period.
++ *
++ * Results:
++ *      None.
++ *
++ * Side effects:
++ *      Adjusts RCU state for the current pCPU.  Caller must have interrupts
++ *      disabled (true at the Task_Switch world-switch call site).
++ *
++ *-----------------------------------------------------------------------------
++ */
++
++void
++HostIF_RCUGuestEnter(void)
++{
++   if (!context_tracking_guest_enter()) {
++      rcu_virt_note_context_switch();
++   }
++}
++
++void
++HostIF_RCUGuestExit(void)
++{
++   if (!context_tracking_guest_exit()) {
++      rcu_virt_note_context_switch();
++   }
++}
++
+--- a/vmmon-only/common/hostif.h
++++ b/vmmon-only/common/hostif.h
+@@ -70,6 +70,9 @@
+ EXTERN Bool  HostIF_Init(VMDriver *vm, uint32 numVCPUs);
+ EXTERN int   HostIF_LookupUserMPN(VMDriver *vm, VA64 uAddr, MPN *mpn);
+ 
++EXTERN void  HostIF_RCUGuestEnter(void);
++EXTERN void  HostIF_RCUGuestExit(void);
++
+ EXTERN MPN   HostIF_GetCrossPageDataMPN(VMCrossPageData *crosspageData);
+ EXTERN MPN   HostIF_GetCrossPageCodeMPN(void);
+ 
