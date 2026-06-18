@@ -27,7 +27,7 @@ since vmnetInt.h is included before compat_netdevice.h in bridge.c.
      dev_queue_xmit(skb)                                   \
    )
 +/*
-+ * dev_base_lock was removed in newer kernels (gone on Pop!_OS 6.12).
++ * dev_base_lock was removed in newer kernels (gone on kernel 6.12+).
 + * rtnl_lock is the modern way to synchronize netdev list walks.
 + */
 +#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
